@@ -1,0 +1,30 @@
+[package]
+name = "sentinel-rpf9-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Zero-copy RPF9 / RDS5-ETPF / RAGE9 asset core for GTA VI archives"
+license = "MIT"
+publish = false
+
+[dependencies]
+memmap2 = "0.9"
+rayon = "1.11"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+# BC7 and BC6H block decode. The BC1..BC5 path stays local; these two modes are
+# a table-driven decoder of their own size and the crate is already vendored for
+# the offline build.
+texture2ddecoder = { version = "0.1.2", default-features = false, features = ["alloc"] }
+
+[[bin]]
+name = "srpf9"
+path = "src/bin/srpf9.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+inherits = "release"

@@ -1,0 +1,7 @@
+target/
+*.png
+!web/static/*.png
+!docs/*.png
+.web/
+*.sqlite-journal
+*.sqlite-wal

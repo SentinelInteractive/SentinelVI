@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/toc",
+    "crates/placement",
+    "crates/anim",
+    "crates/server",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/SentinelInteractive/SentinelVI"
+
+[workspace.dependencies]
+sentinel-core = { path = "crates/core", package = "sentinel-rpf9-core" }
+sentinel-toc = { path = "crates/toc" }
+sentinel-placement = { path = "crates/placement" }
+sentinel-anim = { path = "crates/anim" }
+memmap2 = "0.9"
+rayon = "1.11"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

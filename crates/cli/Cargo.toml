@@ -1,0 +1,20 @@
+[package]
+name = "sentinel-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "sentinel - command line for SentinelVI"
+
+[[bin]]
+name = "sentinel"
+path = "src/main.rs"
+
+[dependencies]
+sentinel-core = { workspace = true }
+sentinel-toc = { workspace = true }
+sentinel-placement = { workspace = true }
+sentinel-anim = { workspace = true }
+sentinel-server = { path = "../server" }
+clap = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }

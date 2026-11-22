@@ -1,0 +1,11 @@
+[package]
+name = "sentinel-toc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Directory and name index for carved RPF9 payload streams"
+
+[dependencies]
+rusqlite = { workspace = true }
+zstd = "0.13"
+serde = { workspace = true }
