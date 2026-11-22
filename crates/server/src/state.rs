@@ -27,6 +27,20 @@ pub struct Job {
     pub progress: Option<(u64, u64)>,
 }
 
+#[derive(Clone)]
+pub struct RasterMeta {
+    pub total: u64,
+    pub bins: u64,
+    pub max: u32,
+    pub width: usize,
+    pub height: usize,
+}
+
+pub struct RasterCacheMeta {
+    pub entries: HashMap<String, RasterMeta>,
+    pub order: Vec<String>,
+}
+
 pub struct App {
     pub cfg: Config,
     pub jobs: Mutex<Vec<Job>>,
@@ -35,7 +49,14 @@ pub struct App {
     pub busy: AtomicBool,
     /// Parsed `.ttpf` headers, keyed by path relative to the game directory.
     pub ttpfs: Mutex<HashMap<String, Arc<sentinel_core::tpfd::Rds5>>>,
+    /// Last eight density rasters, keyed by `bbox|layer|interior|w|h`.
+    pub map_rasters: Mutex<HashMap<String, Arc<Vec<u8>>>>,
+    pub map_raster_meta: Mutex<RasterCacheMeta>,
+    /// Decoded world heightmap: PNG bytes plus its world bounds.
+    pub terrain: Mutex<Option<Arc<(Vec<u8>, [f32; 4])>>>,
 }
+
+const RASTER_CACHE_MAX: usize = 8;
 
 impl App {
     pub fn new(cfg: Config) -> Arc<App> {
@@ -45,7 +66,46 @@ impl App {
             next_id: AtomicU64::new(1),
             busy: AtomicBool::new(false),
             ttpfs: Mutex::new(HashMap::new()),
+            map_rasters: Mutex::new(HashMap::new()),
+            map_raster_meta: Mutex::new(RasterCacheMeta {
+                entries: HashMap::new(),
+                order: Vec::new(),
+            }),
+            terrain: Mutex::new(None),
         })
+    }
+
+    pub fn raster_cached(&self, key: &str) -> Option<(Arc<Vec<u8>>, RasterMeta)> {
+        let rasters = self.map_rasters.lock().ok()?;
+        let mut meta = self.map_raster_meta.lock().ok()?;
+        let png = rasters.get(key)?.clone();
+        let stats = meta.entries.get(key)?.clone();
+        if let Some(i) = meta.order.iter().position(|k| k == key) {
+            let k = meta.order.remove(i);
+            meta.order.push(k);
+        }
+        Some((png, stats))
+    }
+
+    pub fn raster_insert(&self, key: String, png: Vec<u8>, stats: RasterMeta) {
+        let (Ok(mut rasters), Ok(mut meta)) =
+            (self.map_rasters.lock(), self.map_raster_meta.lock())
+        else {
+            return;
+        };
+        if let Some(i) = meta.order.iter().position(|k| k == &key) {
+            meta.order.remove(i);
+        }
+        if !rasters.contains_key(&key) && rasters.len() >= RASTER_CACHE_MAX {
+            if let Some(old) = meta.order.first().cloned() {
+                rasters.remove(&old);
+                meta.entries.remove(&old);
+                meta.order.remove(0);
+            }
+        }
+        rasters.insert(key.clone(), Arc::new(png));
+        meta.entries.insert(key.clone(), stats);
+        meta.order.push(key);
     }
 
     pub fn jobs_snapshot(&self) -> Vec<Job> {

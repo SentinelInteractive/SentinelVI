@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 
 use sentinel_core::source::MmapSource;
 use sentinel_core::tpfd::Rds5;
-use state::{App, Config, Job};
+use state::{App, Config, Job, RasterMeta};
 
 type ApiError = (StatusCode, String);
 type ApiResult = Result<Json<Value>, ApiError>;
@@ -38,7 +38,9 @@ fn internal<E: std::fmt::Display>(e: E) -> ApiError {
     err(StatusCode::INTERNAL_SERVER_ERROR, e)
 }
 
-pub fn router(app: Arc<App>) -> Router {    let api = Router::new()
+pub fn router(app: Arc<App>) -> Router {
+    let warm = app.clone();
+    std::thread::spawn(move || prewarm_density(&warm));    let api = Router::new()
         .route("/health", get(health))
         .route("/info", get(info))
         .route("/library/archives", get(archives))
@@ -51,6 +53,8 @@ pub fn router(app: Arc<App>) -> Router {    let api = Router::new()
         .route("/export/{id}", post(export))
         .route("/map/meta", get(map_meta))
         .route("/map/points", get(map_points))
+        .route("/map/density", get(map_density))
+        .route("/map/terrain", get(map_terrain))
         .route("/textures/files", get(texture_files))
         .route("/textures/entries", get(texture_entries))
         .route("/textures/preview", get(texture_preview))
@@ -124,6 +128,35 @@ async fn health() -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "pid": std::process::id(),
     }))
+}
+
+/// Builds the whole-world density raster once at startup so the first map load
+/// does not wait on a two-second scan.
+fn prewarm_density(app: &App) {
+    let path = app.cfg.paths.cache("placement.sqlite");
+    if !path.is_file() {
+        return;
+    }
+    let world = [-13000.0f32, -9000.0, 7000.0, 11000.0];
+    let key = format!("-13000.0,-9000.0,7000.0,11000.0|0|0|1024|1024");
+    if app.raster_cached(&key).is_some() {
+        return;
+    }
+    let Ok(conn) = sentinel_placement::open(&path) else {
+        return;
+    };
+    let Ok(d) = sentinel_placement::density(&conn, world, 0, false, 1024, 1024) else {
+        return;
+    };
+    let stats = state::RasterMeta {
+        total: d.total,
+        bins: d.bins,
+        max: d.max,
+        width: d.width,
+        height: d.height,
+    };
+    let png = sentinel_core::img::png_rgba(d.width, d.height, &raster_rgba(&d));
+    app.raster_insert(key, png, stats);
 }
 
 fn toc(app: &App) -> Result<sentinel_toc::Toc, ApiError> {    let db = app.cfg.paths.toc_db();
@@ -374,6 +407,10 @@ struct MapQuery {
     interior: u8,
     #[serde(default = "default_points")]
     limit: usize,
+    #[serde(default = "default_stride")]
+    stride: usize,
+    #[serde(default)]
+    mode: String,
 }
 
 fn default_bbox() -> String {
@@ -384,33 +421,218 @@ fn default_points() -> usize {
     20000
 }
 
-async fn map_points(State(app): State<Arc<App>>, Query(q): Query<MapQuery>) -> ApiResult {
-    let path = placement_path(&app);
-    if !path.is_file() {
-        return Ok(Json(json!({"exists": false, "points": [], "total": 0})));
-    }
-    let nums: Vec<f32> = q
-        .bbox
+fn default_stride() -> usize {
+    1
+}
+
+fn parse_bbox(raw: &str) -> Result<[f32; 4], ApiError> {
+    let nums: Vec<f32> = raw
         .split(',')
         .filter_map(|s| s.trim().parse::<f32>().ok())
         .collect();
     if nums.len() != 4 {
         return Err(bad("bbox must be x0,y0,x1,y1"));
     }
-    let bbox = [nums[0], nums[1], nums[2], nums[3]];
+    Ok([nums[0], nums[1], nums[2], nums[3]])
+}
+
+async fn map_points(State(app): State<Arc<App>>, Query(q): Query<MapQuery>) -> ApiResult {
+    let sample = q.mode == "sample" || q.stride > 1;
+    let mode = if sample { "sample" } else { "exact" };
+    let path = placement_path(&app);
+    if !path.is_file() {
+        return Ok(Json(json!({"exists": false, "points": [], "total": 0, "mode": mode})));
+    }
+    let bbox = parse_bbox(&q.bbox)?;
     let conn = sentinel_placement::open(&path).map_err(internal)?;
     let total = sentinel_placement::count(&conn, bbox, q.layer, q.interior != 0)
         .map_err(|e| internal(format!("placement index: {e}")))?;
-    let rows = sentinel_placement::query(&conn, bbox, q.layer, q.interior != 0, q.limit.min(40000))
-        .map_err(|e| internal(format!("placement index: {e}")))?;
+    let limit = q.limit.min(40000);
+    let rows = if sample {
+        sentinel_placement::query_stratified(&conn, bbox, q.layer, q.interior != 0, limit)
+    } else {
+        sentinel_placement::query(&conn, bbox, q.layer, q.interior != 0, limit)
+    }
+    .map_err(|e| internal(format!("placement index: {e}")))?;
     let points: Vec<[f32; 2]> = rows.iter().map(|p| [p.x, p.y]).collect();
     Ok(Json(json!({
         "exists": true,
         "total": total,
         "shown": points.len(),
         "bbox": bbox,
+        "mode": mode,
         "points": points,
     })))
+}
+
+#[derive(serde::Deserialize)]
+struct DensityQuery {
+    #[serde(default = "default_bbox")]
+    bbox: String,
+    #[serde(default)]
+    layer: u8,
+    #[serde(default)]
+    interior: u8,
+    #[serde(default = "default_raster")]
+    w: usize,
+    #[serde(default = "default_raster")]
+    h: usize,
+}
+
+fn default_raster() -> usize {
+    1024
+}
+
+fn raster_rgba(d: &sentinel_placement::Density) -> Vec<u8> {
+    let mut rgba = vec![0u8; d.width * d.height * 4];
+    if d.max == 0 {
+        for px in rgba.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        return rgba;
+    }
+    let denom = (1.0 + d.max as f64).ln().max(1e-6);
+    for (i, &cell) in d.cells.iter().enumerate() {
+        let v = if cell == 0 {
+            0u8
+        } else {
+            // Square root of the log ratio lifts single-record cells off the
+            // floor without flattening the dense cores.
+            let t = (1.0 + cell as f64).ln() / denom;
+            ((255.0 * t.sqrt()).round() as u8).clamp(52, 255)
+        };
+        let o = i * 4;
+        rgba[o] = v;
+        rgba[o + 1] = v;
+        rgba[o + 2] = v;
+        rgba[o + 3] = 255;
+    }
+    rgba
+}
+
+fn density_response(png: &[u8], stats: &RasterMeta) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    let mut set = |name: &'static str, value: String| {
+        if let Ok(v) = HeaderValue::from_str(&value) {
+            headers.insert(header::HeaderName::from_static(name), v);
+        }
+    };
+    set("x-sentinel-total", stats.total.to_string());
+    set("x-sentinel-bins", stats.bins.to_string());
+    set("x-sentinel-max", stats.max.to_string());
+    set("x-sentinel-size", format!("{}x{}", stats.width, stats.height));
+    (headers, png.to_vec()).into_response()
+}
+
+async fn map_density(
+    State(app): State<Arc<App>>,
+    Query(q): Query<DensityQuery>,
+) -> Result<Response, ApiError> {
+    let bbox = parse_bbox(&q.bbox)?;
+    let layer = q.layer;
+    let interior = q.interior != 0;
+    let w = q.w;
+    let h = q.h;
+    let key = format!("{}|{}|{}|{}|{}", q.bbox, q.layer, q.interior, w, h);
+
+    if let Some((png, stats)) = app.raster_cached(&key) {
+        return Ok(density_response(&png, &stats));
+    }
+
+    let path = placement_path(&app);
+    if !path.is_file() {
+        return Err(err(StatusCode::NOT_FOUND, "placement index not built"));
+    }
+
+    let (png, stats) = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, RasterMeta), String> {
+        let conn = sentinel_placement::open(&path).map_err(|e| format!("placement index: {e}"))?;
+        let d = sentinel_placement::density(&conn, bbox, layer, interior, w, h)?;
+        let rgba = raster_rgba(&d);
+        let png = sentinel_core::img::png_rgba(d.width, d.height, &rgba);
+        let stats = RasterMeta {
+            total: d.total,
+            bins: d.bins,
+            max: d.max,
+            width: d.width,
+            height: d.height,
+        };
+        Ok((png, stats))
+    })
+    .await
+    .map_err(internal)?
+    .map_err(|e| internal(format!("placement index: {e}")))?;
+
+    app.raster_insert(key, png.clone(), stats.clone());
+    Ok(density_response(&png, &stats))
+}
+
+/// World heightmap from `common.rpf`, decoded with the core MHIU reader. The
+/// raster is its own georeference: the MHIU header carries the world bounds.
+async fn map_terrain(State(app): State<Arc<App>>) -> Result<Response, ApiError> {
+    let cached = app.terrain.lock().unwrap().clone();
+    let (png, bounds) = match cached {
+        Some(hit) => (hit.0.clone(), hit.1),
+        None => {
+            let path = app.cfg.paths.archive("common");
+            let cache_dir = app.cfg.paths.cache_dir();
+            let built = tokio::task::spawn_blocking(move || decode_terrain(&path, &cache_dir))
+                .await
+                .map_err(internal)?
+                .map_err(|e| err(StatusCode::NOT_FOUND, e))?;
+            let arc = Arc::new(built);
+            *app.terrain.lock().unwrap() = Some(arc.clone());
+            (arc.0.clone(), arc.1)
+        }
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("max-age=3600"));
+    let bounds_text = format!("{},{},{},{}", bounds[0], bounds[1], bounds[2], bounds[3]);
+    if let Ok(v) = HeaderValue::from_str(&bounds_text) {
+        headers.insert(header::HeaderName::from_static("x-sentinel-bounds"), v);
+    }
+    Ok((headers, png).into_response())
+}
+
+/// One heightmap decode: `mhiu::find_in_archive` locates the page chain in the
+/// archive, the hillshade is downsampled to 1024 px and flattened into the
+/// dim grey band the map draws under the placement density.
+fn decode_terrain(archive: &std::path::Path, cache_dir: &std::path::Path) -> Result<(Vec<u8>, [f32; 4]), String> {
+    let src = MmapSource::open(archive, 64 << 20).map_err(|e| format!("{}: {e}", archive.display()))?;
+    let map = sentinel_core::mhiu::find_in_archive(src.as_ref(), 0x40)
+        .map_err(|e| format!("heightmap decode: {e}"))?;
+    let shade = map.hillshade();
+    let out = 1024usize;
+    let step = (map.width / out).max(1);
+    let w = (map.width / step).min(out);
+    let h = (map.height / step).min(out);
+    let mut rgba = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let src_i = (y * step) * map.width + x * step;
+            let v = shade.get(src_i).copied().unwrap_or(23) as u32;
+            let grey = 20 + (v * 44 / 255) as u8;
+            let o = (y * w + x) * 4;
+            rgba[o] = grey;
+            rgba[o + 1] = grey;
+            rgba[o + 2] = grey;
+            rgba[o + 3] = 255;
+        }
+    }
+    let bounds = [map.bmin[0], map.bmin[1], map.bmax[0], map.bmax[1]];
+    let png = sentinel_core::img::png_rgba(w, h, &rgba);
+    let _ = std::fs::create_dir_all(cache_dir);
+    let _ = std::fs::write(cache_dir.join("terrain.png"), &png);
+    let meta = serde_json::json!({
+        "bounds": bounds,
+        "width": w,
+        "height": h,
+        "source": "common.rpf",
+    });
+    let _ = std::fs::write(cache_dir.join("terrain.json"), meta.to_string());
+    Ok((png, bounds))
 }
 
 fn parse_ttpf(app: &App, rel: &str) -> Result<Arc<Rds5>, ApiError> {

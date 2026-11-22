@@ -16,11 +16,9 @@ State at the first published commit. Everything below is measured, not planned.
 
 ## Deferred, with the reason
 
-- **LOD filter on the map.** No per-record LOD field is decoded, so the screen offers record type (entity, prop) and interior resources instead. Inventing a LOD control would be a fake filter.
+- **LOD filter on the map.** No per-record LOD field is decoded, so the screen offers record type (entity, prop) and interior resources instead. A LOD control would be a fake filter.
 - **Animation frame counts and durations.** The clip record at virtual `0x740` (stride `0x70`) parses, but no resource sampled in the first 400 MB of `anim.rpf` carries a `.clip` name string in its virtual pages, so no record can be paired with a name. The screen lists the 13,199 clip names the directory index already holds and states that frame data is not decoded. Next step: locate the metadata payload family (the 737 streams that hold `.clip` strings) and read records from there.
 - **Prop coverage.** 6,186,628 prop records were read and 1,458,675 stored, against 24,886,645 in the research census. Most prop blocks live in physical pages that the carver does not resolve for every resource. The screen states what is stored and the ratio it applies.
-- **Map sampling.** A view that holds more than 20,000 placements shows 20,000 of them, in insertion order, not a random sample. The caption reports the totals; it does not claim the drawn subset is representative.
-- **Wide-view count latency.** The `count(*)` in `/api/map/points` takes about three seconds on the full world bound. Panning inside the city is faster because the index range is smaller.
 - **3D map tab.** Not started.
 
 ## Screenshots
@@ -28,3 +26,7 @@ State at the first published commit. Everything below is measured, not planned.
 `docs/library-1280.png`, `docs/library-375.png`, `docs/map-1280.png`, `docs/map-375.png`, `docs/asset-1280.png`, `docs/textures-1280.png`, `docs/audio-1280.png`, `docs/animation-1280.png`, `docs/jobs-1280.png`.
 
 The 375 px screenshots are rendered in a 375 px iframe because headless Chrome on Windows refuses a window narrower than about 500 px. The iframe viewport is a real 375 px layout viewport.
+
+- **Install-wide entity total.** The published census stands behind 2,281,720 de-duplicated entity records across 22 archives; this index covers levels.rpf only and reads 2,244,675. Scanning the two pack archives inside packs.rpf and de-duplicating byte-identical records is the next build step; the map currently states its own numbers and does not claim the install-wide total.
+- **Terrain georeference.** The terrain layer is the MHIU heightmap decoded from common.rpf by the core reader. Its bounds come from the MHIU header, not from a scan for a magic string; a literal MHIU byte scan finds nothing because the page is zlib compressed.
+

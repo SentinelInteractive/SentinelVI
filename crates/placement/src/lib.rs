@@ -71,6 +71,16 @@ pub struct MapMeta {
     pub bounds: [f32; 4],
 }
 
+#[derive(Clone, serde::Serialize)]
+pub struct Density {
+    pub total: u64,
+    pub bins: u64,
+    pub max: u32,
+    pub width: usize,
+    pub height: usize,
+    pub cells: Vec<u32>,
+}
+
 #[inline]
 fn u16le(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
@@ -816,5 +826,132 @@ pub fn count(
     )
     .map(|n| n.max(0) as u64)
     .map_err(|e| format!("count points: {e}"))
+}
+
+/// Bin every row in the bbox into a `width` x `height` grid. One pass over the
+/// rows, no LIMIT.
+pub fn density(
+    conn: &Connection,
+    bbox: [f32; 4],
+    layer: u8,
+    interior_only: bool,
+    width: usize,
+    height: usize,
+) -> Result<Density, String> {
+    let width = width.clamp(16, 2048);
+    let height = height.clamp(16, 2048);
+    let sql = format!(
+        "SELECT x,y FROM points WHERE {}",
+        filter_sql(layer, interior_only)
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare density: {e}"))?;
+    let mut rows = stmt
+        .query(params![
+            bbox[0] as f64,
+            bbox[2] as f64,
+            bbox[1] as f64,
+            bbox[3] as f64,
+            layer as i64
+        ])
+        .map_err(|e| format!("query density: {e}"))?;
+
+    let mut cells = vec![0u32; width * height];
+    let mut total = 0u64;
+    let mut bins = 0u64;
+    let mut max = 0u32;
+    let sx = (bbox[2] - bbox[0]) as f64;
+    let sy = (bbox[3] - bbox[1]) as f64;
+
+    while let Some(row) = rows.next().map_err(|e| format!("read density row: {e}"))? {
+        let x: f64 = row.get(0).map_err(|e| format!("read density x: {e}"))?;
+        let y: f64 = row.get(1).map_err(|e| format!("read density y: {e}"))?;
+        // Same bounds test as the SQL index prefilter in `query`.
+        if x < bbox[0] as f64
+            || x > bbox[2] as f64
+            || y < bbox[1] as f64
+            || y > bbox[3] as f64
+        {
+            continue;
+        }
+        let col = if sx > 0.0 {
+            (((x - bbox[0] as f64) / sx) * width as f64) as usize
+        } else {
+            0
+        };
+        let row_at = if sy > 0.0 {
+            (((y - bbox[1] as f64) / sy) * height as f64) as usize
+        } else {
+            0
+        };
+        let i = row_at.min(height - 1) * width + col.min(width - 1);
+        if cells[i] == 0 {
+            bins += 1;
+        }
+        cells[i] += 1;
+        max = max.max(cells[i]);
+        total += 1;
+    }
+
+    Ok(Density {
+        total,
+        bins,
+        max,
+        width,
+        height,
+        cells,
+    })
+}
+
+/// Even stride over rowid so a sampled view covers the whole extent instead of
+/// the first rows: step = max(1, total / limit).
+pub fn query_stratified(
+    conn: &Connection,
+    bbox: [f32; 4],
+    layer: u8,
+    interior_only: bool,
+    limit: usize,
+) -> Result<Vec<Point>, String> {
+    let limit = limit.max(1) as i64;
+    let total = count(conn, bbox, layer, interior_only)?;
+    let step = ((total / limit as u64).max(1)) as i64;
+    let sql = format!(
+        "SELECT x,y,z,arch,flags,layer,interior,res FROM points WHERE {} AND (rowid % ?6) = 0 LIMIT ?7",
+        filter_sql(layer, interior_only)
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare stratified query: {e}"))?;
+    let rows = stmt
+        .query_map(
+            params![
+                bbox[0] as f64,
+                bbox[2] as f64,
+                bbox[1] as f64,
+                bbox[3] as f64,
+                layer as i64,
+                step,
+                limit
+            ],
+            |r| {
+                Ok(Point {
+                    x: r.get::<_, f64>(0)? as f32,
+                    y: r.get::<_, f64>(1)? as f32,
+                    z: r.get::<_, f64>(2)? as f32,
+                    arch: r.get::<_, i64>(3)? as u32,
+                    flags: r.get::<_, i64>(4)? as u32,
+                    layer: r.get::<_, i64>(5)? as u8,
+                    interior: r.get::<_, i64>(6)? as u8,
+                    res: r.get::<_, i64>(7)? as u64,
+                })
+            },
+        )
+        .map_err(|e| format!("query stratified points: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("read point: {e}"))?);
+    }
+    Ok(out)
 }
 

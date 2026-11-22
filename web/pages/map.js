@@ -1,6 +1,9 @@
 import { el, fmt, get, empty } from "../app.js";
 
 const WORLD = [-13000, -9000, 7000, 11000];
+const RASTER = 1024;
+const POINT_SPAN = 5000;
+const POINT_LIMIT = 20000;
 
 export async function mount(root) {
   const meta = await get("/api/map/meta").catch(() => ({ exists: false }));
@@ -27,17 +30,22 @@ export async function mount(root) {
     el("button", { type: "button", "aria-pressed": "false", text: "Props" }),
   ];
   const interiorBox = el("input", { type: "checkbox", id: "interior" });
-  const countLine = headLine;
   const canvas = el("canvas", { tabindex: "0", "aria-label": "Placement map" });
-  const frame = el("div", { class: "map-frame" }, [canvas]);
+  const worldRaster = el("img", {
+    class: "map-raster",
+    alt: "",
+    src: "/api/map/density?bbox=-13000,-9000,7000,11000&layer=0&interior=0&w=1024&h=1024",
+  });
+  const frame = el("div", { class: "map-frame" }, [worldRaster, canvas]);
   const caption = el("p", { class: "hint" });
 
-  const tools = el("div", { class: "map-tools" }, [
-    el("button", { class: "btn", type: "button", text: "+", "aria-label": "Zoom in", onclick: () => zoom(1 / 1.4) }),
-    el("button", { class: "btn", type: "button", text: "−", "aria-label": "Zoom out", onclick: () => zoom(1.4) }),
-    el("button", { class: "btn", type: "button", text: "Whole map", onclick: reset }),
-  ]);
-  frame.append(tools);
+  frame.append(
+    el("div", { class: "map-tools" }, [
+      el("button", { class: "btn", type: "button", text: "+", "aria-label": "Zoom in", onclick: () => zoom(1 / 1.4) }),
+      el("button", { class: "btn", type: "button", text: "−", "aria-label": "Zoom out", onclick: () => zoom(1.4) }),
+      el("button", { class: "btn", type: "button", text: "Whole map", onclick: reset }),
+    ]),
+  );
 
   root.append(
     el("div", { class: "screen" }, [
@@ -50,19 +58,46 @@ export async function mount(root) {
       caption,
     ]),
   );
+  document.title = "Map - SentinelVI";
+  caption.textContent =
+    "Placement density over the whole map, one cell per 1024th of the view. Terrain comes from the heightmap in common.rpf.";
 
   let bbox = [...WORLD];
   let layer = 0;
   let interior = false;
   let points = [];
-  let total = 0;
-  let shown = 0;
+  let mode = "density";
+  let raster = null;
+  let rasterKey = "";
+  let rasterStats = { total: 0, bins: 0, max: 0 };
+  let terrain = null;
   let loading = false;
 
+  function statusLine() {
+    const stored = layer === 0 ? m.entities_stored : m.props_stored;
+    const noun = layer === 0 ? "entities" : "props";
+    headLine.textContent = `${fmt.int(stored)} ${noun} stored`;
+  }
+
   const ctx = canvas.getContext("2d", { alpha: false });
-  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = 1;
   let width = 0;
   let height = 0;
+
+  function project(x, y) {
+    const dx = bbox[2] - bbox[0];
+    const dy = bbox[3] - bbox[1];
+    const s = Math.min(width / dx, height / dy);
+    const ox = (width - dx * s) / 2;
+    const oy = (height - dy * s) / 2;
+    return [(ox + (x - bbox[0]) * s) * dpr, canvas.height - (oy + (y - bbox[1]) * s) * dpr];
+  }
+
+  function worldRect(b) {
+    const [l, t] = project(b[0], b[3]);
+    const [r, bo] = project(b[2], b[1]);
+    return [l, t, Math.max(1, r - l), Math.max(1, bo - t)];
+  }
 
   function resize() {
     const rect = frame.getBoundingClientRect();
@@ -76,77 +111,143 @@ export async function mount(root) {
     draw();
   }
 
-  // Keep one metre the same length on both axes, and letterbox the rest.
-  function project(x, y) {
-    const dx = bbox[2] - bbox[0];
-    const dy = bbox[3] - bbox[1];
-    const s = Math.min(width / dx, height / dy);
-    const ox = (width - dx * s) / 2;
-    const oy = (height - dy * s) / 2;
-    return [(ox + (x - bbox[0]) * s) * dpr, canvas.height - (oy + (y - bbox[1]) * s) * dpr];
-  }
-
   function draw() {
     if (!width || !height) return;
+    ctx.globalCompositeOperation = "source-over";
     ctx.fillStyle = "#161616";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    if (!points.length) {
+
+    if (terrain) {
+      const [x, y, w, h] = worldRect(terrain.bounds);
+      ctx.globalAlpha = 1;
+      ctx.drawImage(terrain.image, x, y, w, h);
+    }
+
+    if (mode === "density" && raster) {
+      const [x, y, w, h] = worldRect(bbox);
+      // Black cells add nothing, so the density lightens the terrain instead of
+      // covering it.
+      ctx.globalCompositeOperation = "lighter";
+      ctx.drawImage(raster, x, y, w, h);
+      ctx.globalCompositeOperation = "source-over";
+    }
+
+    if (mode === "points") {
+      ctx.fillStyle = "rgba(250, 250, 250, 0.55)";
+      for (const p of points) {
+        const [px, py] = project(p[0], p[1]);
+        const ix = px | 0;
+        const iy = py | 0;
+        if (ix < 0 || iy < 0 || ix >= canvas.width || iy >= canvas.height) continue;
+        ctx.fillRect(ix, iy, 1, 1);
+      }
+    }
+
+    if (loading) {
       ctx.fillStyle = "#9A9A9A";
       ctx.font = `${12 * dpr}px "JetBrains Mono", monospace`;
-      ctx.fillText(loading ? "reading placements" : "no placements in view", 16 * dpr, 24 * dpr);
-      return;
-    }
-    // One point is one placement. Overlapping points brighten because each one
-    // adds a fixed alpha, so density reads without a legend.
-    ctx.fillStyle = "rgba(250, 250, 250, 0.55)";
-    for (const p of points) {
-      const [px, py] = project(p[0], p[1]);
-      const ix = px | 0;
-      const iy = py | 0;
-      if (ix < 0 || iy < 0 || ix >= canvas.width || iy >= canvas.height) continue;
-      ctx.fillRect(ix, iy, 1, 1);
+      ctx.fillText("reading placements", 16 * dpr, 24 * dpr);
     }
   }
 
   function updateCaption() {
     const layerName = layer === 0 ? "entities" : "props";
-    if (loading) {
-      countLine.textContent = "reading placements";
-      return;
-    }
-    countLine.textContent = `Showing ${fmt.int(shown)} of ${fmt.int(total)} ${layerName} in view`;
     const stored = layer === 0 ? m.entities_stored : m.props_stored;
     const read = layer === 0 ? m.entities : m.props;
+    headLine.textContent = loading
+      ? "reading placements"
+      : `${fmt.int(stored)} ${layerName} stored`;
+    if (mode === "points") {
+      caption.textContent = `Zoomed in: up to ${fmt.int(
+        POINT_LIMIT,
+      )} placements are drawn, spread evenly across the view. ${fmt.int(
+        stored,
+      )} ${layerName} are stored in total.`;
+      return;
+    }
     caption.textContent =
-      layer === 0
-        ? `${fmt.int(stored)} of ${fmt.int(read)} entity records are inside the map bounds and stored. Every stored entity is drawn when it falls in view.`
-        : `${fmt.int(stored)} of ${fmt.int(read)} prop instances are stored: one in four is kept, so the props layer is a sample. Every stored prop is drawn when it falls in view.`;
+      `Density of all ${fmt.int(rasterStats.total)} ${layerName} in this view over ${fmt.int(
+        RASTER,
+      )} × ${fmt.int(RASTER)} cells; the brightest cell holds ${fmt.int(rasterStats.max)}. ` +
+      (layer === 1
+        ? `${fmt.int(read)} prop records were read and ${fmt.int(
+            stored,
+          )} are stored, one in four.`
+        : `${fmt.int(stored)} of ${fmt.int(read)} entity records are inside the map bounds.`);
   }
 
-  let fetchTimer = null;
-  async function fetchPoints() {
-    if (fetchTimer) clearTimeout(fetchTimer);
-    fetchTimer = setTimeout(async () => {
+  function span() {
+    return Math.max(bbox[2] - bbox[0], bbox[3] - bbox[1]);
+  }
+
+  let timer = null;
+  async function refresh() {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(async () => {
       loading = true;
       updateCaption();
+      draw();
+      const q = bbox.map((v) => v.toFixed(1)).join(",");
+      const wantPoints = span() <= POINT_SPAN;
       try {
-        const q = bbox.map((v) => v.toFixed(1)).join(",");
-        const body = await get(
-          `/api/map/points?bbox=${q}&layer=${layer}&interior=${interior ? 1 : 0}&limit=20000`,
-        );
-        points = body.points || [];
-        total = body.total || 0;
-        shown = body.shown || 0;
+        if (wantPoints) {
+          const body = await get(
+            `/api/map/points?bbox=${q}&layer=${layer}&interior=${interior ? 1 : 0}&limit=${POINT_LIMIT}&mode=sample`,
+          );
+          points = body.points || [];
+          mode = "points";
+        } else {
+          const key = `${q}|${layer}|${interior ? 1 : 0}`;
+          const res = await fetch(
+            `/api/map/density?bbox=${q}&layer=${layer}&interior=${interior ? 1 : 0}&w=${RASTER}&h=${RASTER}`,
+          );
+          if (!res.ok) throw new Error(`density request failed (${res.status})`);
+          rasterStats = {
+            total: Number(res.headers.get("x-sentinel-total") || 0),
+            bins: Number(res.headers.get("x-sentinel-bins") || 0),
+            max: Number(res.headers.get("x-sentinel-max") || 0),
+          };
+          mode = "density";
+          if (key !== rasterKey) {
+            rasterKey = key;
+            const img = new Image();
+            img.onload = () => {
+              raster = img;
+              draw();
+            };
+            img.src = URL.createObjectURL(await res.blob());
+          }
+        }
       } catch (e) {
         points = [];
-        total = 0;
-        shown = 0;
-        countLine.textContent = e.message;
+        headLine.textContent = e.message;
       }
       loading = false;
-      draw();
-      updateCaption();
-    }, 90);
+      try {
+        draw();
+        updateCaption();
+      } catch (err) {
+        headLine.textContent = err.message;
+      }
+    }, 120);
+  }
+
+  async function loadTerrain() {
+    try {
+      const res = await fetch("/api/map/terrain");
+      if (!res.ok) return;
+      const bounds = (res.headers.get("x-sentinel-bounds") || "")
+        .split(",")
+        .map((v) => Number(v.trim()));
+      if (bounds.length !== 4 || bounds.some((v) => !Number.isFinite(v))) return;
+      const blob = await res.blob();
+      const img = new Image();
+      img.src = URL.createObjectURL(blob);
+      await img.decode();
+      terrain = { image: img, bounds };
+    } catch {
+      terrain = null;
+    }
   }
 
   function clampBbox(next) {
@@ -177,19 +278,19 @@ export async function mount(root) {
       cy + (bbox[3] - cy) * factor,
     ]);
     draw();
-    fetchPoints();
+    refresh();
   }
 
   function pan(dx, dy) {
     bbox = [bbox[0] + dx, bbox[1] + dy, bbox[2] + dx, bbox[3] + dy];
     draw();
-    fetchPoints();
+    refresh();
   }
 
   function reset() {
     bbox = [...WORLD];
     draw();
-    fetchPoints();
+    refresh();
   }
 
   canvas.addEventListener("pointerdown", (e) => {
@@ -207,7 +308,7 @@ export async function mount(root) {
     const up = () => {
       canvas.removeEventListener("pointermove", move);
       canvas.removeEventListener("pointerup", up);
-      fetchPoints();
+      refresh();
     };
     canvas.addEventListener("pointermove", move);
     canvas.addEventListener("pointerup", up);
@@ -245,22 +346,30 @@ export async function mount(root) {
     b.addEventListener("click", () => {
       layer = idx;
       layerButtons.forEach((x, i) => x.setAttribute("aria-pressed", i === idx ? "true" : "false"));
-      fetchPoints();
+      refresh();
     }),
   );
   interiorBox.addEventListener("change", () => {
     interior = interiorBox.checked;
-    fetchPoints();
+    refresh();
   });
 
   const observer = new ResizeObserver(() => resize());
   observer.observe(frame);
   resize();
-  fetchPoints();
+  statusLine();
+  loadTerrain().then(() => {
+    draw();
+    refresh();
+  });
 
   return {
     cleanup: () => observer.disconnect(),
     onEscape: reset,
   };
 }
+
+
+
+
 

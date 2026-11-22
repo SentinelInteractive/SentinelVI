@@ -63,7 +63,7 @@ Data path: `SENTINEL_DATA`, default `D:\GTA6`. The game directory is the first c
 
 - **Library**: archive tree from `vi_toc.db`, search over the inferred names, confidence per row, inspector with the selected payload.
 - **Asset**: one payload with its archive, pack, offset, sizes, hash, confidence and the first bytes of its decoded payload. One action: export it.
-- **Map**: placements decoded from the map resources, entities or props, interior resources only, pan and zoom.
+- **Map**: placement density over the whole map from a 1,024 x 1,024 raster of every stored record, with the heightmap terrain from `common.rpf` behind it. Zoom past 5 km and it switches to at most 20,000 points spread across the view. Entities or props, interior resources only, pan and zoom.
 - **Textures**: `.ttpf` databases, their texture descriptors, a decoded preview for BC1, BC3, BC5 and BC7 surfaces, PNG export.
 - **Audio**: ADAT banks with stream count, sample count and rate, played as Ogg Opus.
 - **Animation**: clip records with frame count, duration and keyframe count. Names are shown only where the resource holds one name per record.
@@ -82,4 +82,5 @@ The placement index stores every entity record inside the map bounds and one pro
 ## Licence
 
 MIT. See `LICENSE`. The crate in `crates/core` is a copy of `sentinel-rpf9-core`, also MIT.
+
 
