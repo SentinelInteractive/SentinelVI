@@ -497,9 +497,9 @@ fn raster_rgba(d: &sentinel_placement::Density) -> Vec<u8> {
             0u8
         } else {
             // Square root of the log ratio lifts single-record cells off the
-            // floor without flattening the dense cores.
+            // floor, and the 96 floor keeps roads and coast legible on black.
             let t = (1.0 + cell as f64).ln() / denom;
-            ((255.0 * t.sqrt()).round() as u8).clamp(52, 255)
+            ((255.0 * t.sqrt()).round() as u8).clamp(96, 255)
         };
         let o = i * 4;
         rgba[o] = v;
@@ -613,7 +613,7 @@ fn decode_terrain(archive: &std::path::Path, cache_dir: &std::path::Path) -> Res
         for x in 0..w {
             let src_i = (y * step) * map.width + x * step;
             let v = shade.get(src_i).copied().unwrap_or(23) as u32;
-            let grey = 20 + (v * 44 / 255) as u8;
+            let grey = 22 + (v * 40 / 255) as u8;
             let o = (y * w + x) * 4;
             rgba[o] = grey;
             rgba[o + 1] = grey;

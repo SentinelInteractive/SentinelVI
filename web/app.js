@@ -116,6 +116,7 @@ async function render() {
   const path = currentRoute();
   const entry = routes.find((r) => r.re.test(path));
   const main = document.getElementById("content");
+  document.body.dataset.route = path;
   for (const a of document.querySelectorAll(".nav a")) {
     const target = a.dataset.route;
     const active = entry && path.startsWith(target === "/library" ? "/library" : target);
@@ -202,5 +203,6 @@ window.addEventListener("popstate", render);
 loadCounts();
 render();
 setInterval(loadCounts, 30000);
+
 
 

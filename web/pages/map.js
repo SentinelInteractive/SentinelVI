@@ -5,6 +5,12 @@ const RASTER = 1024;
 const POINT_SPAN = 5000;
 const POINT_LIMIT = 20000;
 
+function compact(n) {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(2)} M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)} k`;
+  return String(n);
+}
+
 export async function mount(root) {
   const meta = await get("/api/map/meta").catch(() => ({ exists: false }));
   const headLine = el("p", { class: "status", id: "map-count", text: "" });
@@ -36,15 +42,16 @@ export async function mount(root) {
     alt: "",
     src: "/api/map/density?bbox=-13000,-9000,7000,11000&layer=0&interior=0&w=1024&h=1024",
   });
-  const frame = el("div", { class: "map-frame" }, [worldRaster, canvas]);
-  const caption = el("p", { class: "hint" });
+  const frame = el("div", { class: "map-frame" }, [canvas, worldRaster]);
+  const caption = el("p", { class: "hint map-caption" });
 
   frame.append(
     el("div", { class: "map-tools" }, [
       el("button", { class: "btn", type: "button", text: "+", "aria-label": "Zoom in", onclick: () => zoom(1 / 1.4) }),
-      el("button", { class: "btn", type: "button", text: "−", "aria-label": "Zoom out", onclick: () => zoom(1.4) }),
+      el("button", { class: "btn", type: "button", text: "-", "aria-label": "Zoom out", onclick: () => zoom(1.4) }),
       el("button", { class: "btn", type: "button", text: "Whole map", onclick: reset }),
     ]),
+    caption,
   );
 
   root.append(
@@ -55,12 +62,9 @@ export async function mount(root) {
         el("label", { class: "check" }, [interiorBox, "Interior resources only"]),
       ]),
       frame,
-      caption,
     ]),
   );
   document.title = "Map - SentinelVI";
-  caption.textContent =
-    "Placement density over the whole map, one cell per 1024th of the view. Terrain comes from the heightmap in common.rpf.";
 
   let bbox = [...WORLD];
   let layer = 0;
@@ -72,12 +76,6 @@ export async function mount(root) {
   let rasterStats = { total: 0, bins: 0, max: 0 };
   let terrain = null;
   let loading = false;
-
-  function statusLine() {
-    const stored = layer === 0 ? m.entities_stored : m.props_stored;
-    const noun = layer === 0 ? "entities" : "props";
-    headLine.textContent = `${fmt.int(stored)} ${noun} stored`;
-  }
 
   const ctx = canvas.getContext("2d", { alpha: false });
   let dpr = 1;
@@ -114,16 +112,17 @@ export async function mount(root) {
   function draw() {
     if (!width || !height) return;
     ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
     ctx.fillStyle = "#161616";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     if (terrain) {
       const [x, y, w, h] = worldRect(terrain.bounds);
-      ctx.globalAlpha = 1;
       ctx.drawImage(terrain.image, x, y, w, h);
     }
 
     if (mode === "density" && raster) {
+      worldRaster.hidden = true;
       const [x, y, w, h] = worldRect(bbox);
       // Black cells add nothing, so the density lightens the terrain instead of
       // covering it.
@@ -133,7 +132,7 @@ export async function mount(root) {
     }
 
     if (mode === "points") {
-      ctx.fillStyle = "rgba(250, 250, 250, 0.55)";
+      ctx.fillStyle = "rgba(250, 250, 250, 0.7)";
       for (const p of points) {
         const [px, py] = project(p[0], p[1]);
         const ix = px | 0;
@@ -142,38 +141,33 @@ export async function mount(root) {
         ctx.fillRect(ix, iy, 1, 1);
       }
     }
-
-    if (loading) {
-      ctx.fillStyle = "#9A9A9A";
-      ctx.font = `${12 * dpr}px "JetBrains Mono", monospace`;
-      ctx.fillText("reading placements", 16 * dpr, 24 * dpr);
-    }
   }
 
+  /// One line under the map. Everything else is in the tooltip.
   function updateCaption() {
-    const layerName = layer === 0 ? "entities" : "props";
     const stored = layer === 0 ? m.entities_stored : m.props_stored;
     const read = layer === 0 ? m.entities : m.props;
-    headLine.textContent = loading
-      ? "reading placements"
-      : `${fmt.int(stored)} ${layerName} stored`;
-    if (mode === "points") {
-      caption.textContent = `Zoomed in: up to ${fmt.int(
-        POINT_LIMIT,
-      )} placements are drawn, spread evenly across the view. ${fmt.int(
-        stored,
-      )} ${layerName} are stored in total.`;
+    const noun = layer === 0 ? "entities" : "props";
+    headLine.textContent = loading ? "reading placements" : `${fmt.int(stored)} ${noun} stored`;
+    if (loading) {
+      caption.textContent = "";
       return;
     }
-    caption.textContent =
-      `Density of all ${fmt.int(rasterStats.total)} ${layerName} in this view over ${fmt.int(
-        RASTER,
-      )} × ${fmt.int(RASTER)} cells; the brightest cell holds ${fmt.int(rasterStats.max)}. ` +
-      (layer === 1
-        ? `${fmt.int(read)} prop records were read and ${fmt.int(
-            stored,
-          )} are stored, one in four.`
-        : `${fmt.int(stored)} of ${fmt.int(read)} entity records are inside the map bounds.`);
+    const metres = Math.round((bbox[2] - bbox[0]) / RASTER);
+    if (mode === "points") {
+      caption.textContent = `${compact(stored)} ${noun}. ${fmt.int(points.length)} points in view.`;
+      caption.title = `Sampled on a rowid stride across the whole view, ${fmt.int(
+        POINT_LIMIT,
+      )} points at most.`;
+      return;
+    }
+    caption.textContent = `${compact(stored)} ${noun}. Density, ${metres} m cells.`;
+    caption.title =
+      `${fmt.int(rasterStats.total)} ${noun} in this view over ${fmt.int(RASTER)} × ${fmt.int(RASTER)} cells, ` +
+      `${fmt.int(rasterStats.bins)} cells occupied, brightest cell ${fmt.int(rasterStats.max)} records. ` +
+      `${fmt.int(stored)} of ${fmt.int(read)} records inside the map bounds are stored. ` +
+      (layer === 1 ? "One prop instance in four is kept. " : "") +
+      "Terrain is the heightmap from common.rpf.";
   }
 
   function span() {
@@ -181,7 +175,7 @@ export async function mount(root) {
   }
 
   let timer = null;
-  async function refresh() {
+  function refresh() {
     if (timer) clearTimeout(timer);
     timer = setTimeout(async () => {
       loading = true;
@@ -223,12 +217,8 @@ export async function mount(root) {
         headLine.textContent = e.message;
       }
       loading = false;
-      try {
-        draw();
-        updateCaption();
-      } catch (err) {
-        headLine.textContent = err.message;
-      }
+      draw();
+      updateCaption();
     }, 120);
   }
 
@@ -357,7 +347,10 @@ export async function mount(root) {
   const observer = new ResizeObserver(() => resize());
   observer.observe(frame);
   resize();
-  statusLine();
+  headLine.textContent = `${fmt.int(m.entities_stored)} entities stored`;
+  caption.textContent = `${compact(m.entities_stored)} entities. Density, ${Math.round(
+    (WORLD[2] - WORLD[0]) / RASTER,
+  )} m cells.`;
   loadTerrain().then(() => {
     draw();
     refresh();
@@ -368,8 +361,6 @@ export async function mount(root) {
     onEscape: reset,
   };
 }
-
-
 
 
 

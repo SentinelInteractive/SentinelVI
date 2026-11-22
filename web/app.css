@@ -564,7 +564,7 @@ pre.hex {
   position: relative;
   border: 1px solid var(--border);
   background: var(--bg);
-  height: min(72vh, 760px);
+  height: min(62vh, 700px);
   min-height: 360px;
 }
 .map-frame canvas {
@@ -581,6 +581,7 @@ pre.hex {
   position: absolute;
   right: var(--s2);
   bottom: var(--s2);
+  z-index: 3;
   display: flex;
   gap: 4px;
 }
@@ -703,14 +704,14 @@ audio {
   .brand img {
     max-width: 132px;
   }
-  .nav {
+.nav {
     flex-direction: row;
     flex-wrap: wrap;
-    gap: 2px;
+    gap: 1px;
   }
   .nav a {
-    padding: 8px 10px;
-    font-size: 12px;
+    padding: 7px 7px;
+    font-size: 11.5px;
   }
   .counts {
     display: none;
@@ -754,6 +755,10 @@ audio {
   .map-frame {
     height: 60vh;
   }
+  .map-tools {
+    top: var(--s2);
+    bottom: auto;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -767,14 +772,37 @@ audio {
 
 
 
+
+
+body[data-route="/map"] .counts {
+  display: none;
+}
+
+
+.map-frame canvas {
+  position: relative;
+  z-index: 0;
+}
 .map-frame .map-raster {
   position: absolute;
   inset: 0;
+  z-index: 1;
   width: 100%;
   height: 100%;
   object-fit: contain;
-  image-rendering: auto;
   pointer-events: none;
-  opacity: 0.85;
 }
+
+
+
+.map-caption {
+  position: absolute;
+  left: var(--s2);
+  bottom: var(--s2);
+  z-index: 3;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
 
