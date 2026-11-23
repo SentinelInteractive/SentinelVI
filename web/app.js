@@ -2,6 +2,7 @@
 
 const pages = new Map();
 let current = { cleanup: null, focusSearch: null, onEscape: null };
+let renderVersion = 0;
 
 export const fmt = {
   int: (n) => (n === null || n === undefined ? "" : Number(n).toLocaleString("en-US")),
@@ -94,7 +95,8 @@ export function empty(title, body, command) {
 const routes = [
   { re: /^\/$/, load: () => import("./pages/library.js") },
   { re: /^\/library\/?$/, load: () => import("./pages/library.js") },
-  { re: /^\/asset\/(\d+)\/?$/, load: () => import("./pages/asset.js") },
+  { re: /^\/asset\/toc\/(\d+)\/?$/, mode: "toc", load: () => import("./pages/asset.js") },
+  { re: /^\/asset\/(\d+)\/?$/, mode: "fallback", load: () => import("./pages/asset.js") },
   { re: /^\/map\/?$/, load: () => import("./pages/map.js") },
   { re: /^\/textures\/?$/, load: () => import("./pages/textures.js") },
   { re: /^\/audio\/?$/, load: () => import("./pages/audio.js") },
@@ -113,13 +115,16 @@ function currentRoute() {
 }
 
 async function render() {
+  const version = ++renderVersion;
   const path = currentRoute();
   const entry = routes.find((r) => r.re.test(path));
   const main = document.getElementById("content");
   document.body.dataset.route = path;
   for (const a of document.querySelectorAll(".nav a")) {
     const target = a.dataset.route;
-    const active = entry && path.startsWith(target === "/library" ? "/library" : target);
+    const active = entry && (target === "/library"
+      ? path === "/" || path.startsWith("/library") || path.startsWith("/asset/")
+      : path.startsWith(target));
     if (active) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
@@ -142,12 +147,15 @@ async function render() {
     return;
   }
   const mod = await entry.load();
+  if (version !== renderVersion) return;
   const match = path.match(entry.re);
   const params = match ? match.slice(1) : [];
   try {
-    const result = await mod.mount(main, { params, navigate, page: pages });
+    const result = await mod.mount(main, { params, navigate, page: pages, mode: entry.mode });
+    if (version !== renderVersion) return;
     if (result) current = { ...current, ...result };
   } catch (e) {
+    if (version !== renderVersion) return;
     main.append(
       empty(
         "This screen could not load.",
@@ -159,8 +167,27 @@ async function render() {
   main.focus({ preventScroll: true });
 }
 
+function countsUnavailable(box) {
+  box.replaceChildren(el("div", {}, ["index", el("span", { text: "unavailable" })]));
+}
+
 async function loadCounts() {
   const box = document.getElementById("counts");
+  try {
+    const body = await get("/api/library/roots");
+    const rows = body.rows || [];
+    const sum = (key) => rows.reduce((n, r) => n + (Number(r[key]) || 0), 0);
+    box.replaceChildren(
+      el("div", {}, ["slots", el("span", { text: fmt.int(sum("slot_count")) })]),
+      el("div", {}, ["headers", el("span", { text: fmt.int(sum("header_count")) })]),
+    );
+    return;
+  } catch (e) {
+    if (e.status !== 404) {
+      countsUnavailable(box);
+      return;
+    }
+  }
   try {
     const info = await get("/api/info");
     box.replaceChildren(
@@ -169,7 +196,7 @@ async function loadCounts() {
       el("div", {}, ["packs", el("span", { text: fmt.int(info.counts.packs) })]),
     );
   } catch {
-    box.replaceChildren(el("div", {}, ["index", el("span", { text: "unavailable" })]));
+    countsUnavailable(box);
   }
 }
 

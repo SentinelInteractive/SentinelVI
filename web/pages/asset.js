@@ -1,91 +1,83 @@
-import { el, fmt, get, post, empty } from "../app.js";
+import { el, fmt, get, empty } from "../app.js";
 
-function field(kv, label, value) {
-  const text = value === null || value === undefined || value === "" ? "-" : String(value);
-  kv.append(el("dt", { text: label }), el("dd", { text }));
+const PROVENANCE =
+  "This path was matched using a stored hash. It is not an original archive path.";
+
+function slotFields(s) {
+  return [
+    ["root", s.root],
+    ["archive offset", fmt.hex(s.archive_offset)],
+    ["slot", fmt.int(s.slot)],
+    ["absolute data offset", fmt.hex(s.data_offset_absolute)],
+    ["relative data offset", fmt.hex(s.data_offset_relative)],
+    ["stored bytes", fmt.int(s.stored_bytes)],
+    ["logical bytes", fmt.int(s.logical_bytes)],
+    ["kind", s.kind],
+    ["hash32", s.hash32],
+    ["hash64", s.hash64],
+    ["name origin", s.name_origin],
+    ["signature status", s.signature_status],
+  ];
 }
 
-export async function mount(root, { params }) {
+function fallbackFields(s) {
+  return [
+    ["archive", s.archive],
+    ["pack", s.pack],
+    ["offset", fmt.hex(s.stream_offset)],
+    ["logical bytes", fmt.int(s.uncomp_size)],
+    ["stored bytes", fmt.int(s.comp_size)],
+    ["kind", s.payload_kind],
+    ["magic", s.magic],
+    ["sha1", s.sha1],
+    ["confidence", s.confidence],
+    ["how matched", s.source],
+    ["candidates", fmt.int(s.candidates)],
+  ];
+}
+
+export async function mount(root, { params, mode }) {
+  const isToc = mode === "toc";
   const id = params[0];
-  const title = el("h1", { text: "Asset" });
-  const headStatus = el("p", { class: "status", text: `#${id}` });
+  const url = isToc
+    ? `/api/library/slots/${encodeURIComponent(id)}`
+    : `/api/asset/${encodeURIComponent(id)}`;
+
+  const title = el("h1", { text: isToc ? "Slot" : "Asset" });
+  const status = el("p", { class: "status", text: "Loading metadata" });
   const screen = el("div", { class: "screen" }, [
-    el("div", { class: "screen-head" }, [title, headStatus]),
+    el("div", { class: "screen-head" }, [title, status]),
   ]);
   root.append(screen);
 
-  let data;
+  let body;
   try {
-    data = await get(`/api/asset/${id}`);
+    body = await get(url);
   } catch (e) {
-    headStatus.textContent = e.message;
-    screen.append(empty("This asset could not be read.", e.message));
+    status.textContent = e.message || "The record could not be read.";
+    status.dataset.state = "failed";
+    screen.append(empty("This record could not be read.", e.message));
     return {};
   }
-  const s = data.stream;
-  title.textContent = s.name || s.filename || "-";
+
+  const record = isToc ? body.slot : body.stream;
+  if (!record) {
+    status.textContent = "";
+    screen.append(empty("No metadata is stored for this record.", "Open another record from the Library."));
+    return {};
+  }
+  title.textContent = isToc ? record.display_name : record.name || record.filename || `Payload ${id}`;
+  status.textContent = isToc ? "TOC metadata" : "Reconstructed catalog";
 
   const kv = el("dl", { class: "kv" });
-  field(kv, "archive", s.archive);
-  field(kv, "pack", s.pack);
-  field(kv, "offset", s.stream_offset == null ? "-" : fmt.hex(s.stream_offset));
-  field(kv, "size", fmt.bytes(s.uncomp_size));
-  field(kv, "compressed", fmt.bytes(s.comp_size));
-  field(kv, "kind", s.payload_kind);
-  field(kv, "magic", s.magic);
-  field(kv, "sha1", s.sha1);
-  field(kv, "confidence", s.confidence);
-  const sourceText = {
-    "payload:identifier": "pattern inside the payload",
-    "payload:path": "path prefix inside the payload",
-    exact: "exact name",
-  };
-  field(kv, "how matched", sourceText[s.source] || s.source);
-  field(
-    kv,
-    "candidates",
-    typeof s.candidates === "number" ? fmt.int(s.candidates) : s.candidates,
-  );
-
-  const pre = el("pre", { class: "hex" });
-  const exportStatus = el("p", { class: "status" });
-  const button = el("button", {
-    class: "btn btn-primary",
-    type: "button",
-    text: "Export payload",
-    onclick: async () => {
-      button.disabled = true;
-      exportStatus.textContent = "Queuing export";
-      try {
-        const res = await post(`/api/export/${id}`);
-        exportStatus.replaceChildren(
-          document.createTextNode(`Queued as job ${res.job}. `),
-          el("a", { href: "/jobs", text: "Open Jobs" }),
-        );
-      } catch (e) {
-        exportStatus.textContent = e.message;
-      }
-    },
-  });
-  screen.append(kv, pre, button, exportStatus);
-
-  try {
-    const hex = await get(`/api/asset/${id}/hex?bytes=512`);
-    pre.replaceChildren(
-      ...(hex.rows || []).map((r) => {
-        const off =
-          typeof r.offset === "number"
-            ? r.offset.toString(16).toUpperCase().padStart(4, "0")
-            : String(r.offset);
-        return el("div", { text: `${off}  ${r.hex}  ${r.ascii}` });
-      }),
-    );
-  } catch (e) {
-    pre.replaceWith(empty("No preview for this payload.", e.message));
-    button.disabled = true;
-    exportStatus.textContent =
-      "This payload is not in the local bin store, so it cannot be exported here.";
+  const fields = isToc ? slotFields(record) : fallbackFields(record);
+  for (const [label, value] of fields) {
+    kv.append(el("dt", { text: label }), el("dd", { text: value ?? "-" }));
   }
+  if (record.name_origin === "DictionaryMatch") {
+    screen.append(el("p", { class: "hint", text: PROVENANCE }));
+  }
+  screen.append(kv);
 
   return {};
 }

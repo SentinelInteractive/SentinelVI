@@ -5,6 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
+mod full;
+pub use full::{FullToc, Header, Page, Root, Slot, SlotFilter, SlotSearch};
+
 /// Archive names as they appear in `vi_toc.db` and on disk.
 pub const ARCHIVES: &[&str] = &[
     "anim_rpf",
@@ -72,6 +75,9 @@ impl Paths {
 
     pub fn toc_db(&self) -> PathBuf {
         self.root.join("vi_toc.db")
+    }
+    pub fn full_toc_db(&self) -> PathBuf {
+        self.root.join("vi_toc_full.db")
     }
     pub fn bin_store(&self) -> PathBuf {
         self.root.join("bin_store")

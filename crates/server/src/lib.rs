@@ -7,6 +7,7 @@
 pub mod audio;
 pub mod ogg;
 pub mod state;
+mod library;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -46,6 +47,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/library/archives", get(archives))
         .route("/library/packs", get(packs))
         .route("/library/streams", get(streams))
+        .route("/library/roots", get(library::roots))
+        .route("/library/headers", get(library::headers))
+        .route("/library/slots", get(library::slots))
+        .route("/library/slots/{id}", get(library::slot))
         .route("/search", get(search))
         .route("/asset/{id}", get(asset))
         .route("/asset/{id}/payload", get(payload))
